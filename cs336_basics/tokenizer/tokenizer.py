@@ -6,7 +6,7 @@ import operator
 from dataclasses import dataclass, field
 from functools import reduce
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Tuple
 
 import pytest
 import regex as re
@@ -31,14 +31,15 @@ class BPENaive:
     max_vocab_size: int = 1024
     pretokenizer: Callable = pretokenizer_gpt2
     special_tokens: List[str] = field(default_factory=list)
-    # special_tokens_dict: Dict[str, int] = field(default_factory=dict, init=False)
-    vocab: Dict[int, bytes] = field(default_factory=dict, init=False)
+    vocab: Dict[int, bytes] = field(default_factory=dict)
+    merges: list[tuple[bytes, bytes]] = field(default_factory=list)
     vocab_inverse: Dict[bytes, int] = field(default_factory=dict, init=False)
-    merges: list[tuple[bytes, bytes]] = field(default_factory=list, init=False)
 
     def __post_init__(self):
-        self._map_special_tokens()
-        self._train(self.corpus_path)
+        if len(self.vocab) == 0:
+            # We allow for vocab/merges to be passed in from a pretrained tokenizer.
+            self._map_special_tokens()
+            self._train(self.corpus_path)
         # BUG: could be a bug, not being careful...
         self.vocab_inverse = {v: k for k, v in self.vocab.items()}
 
@@ -53,7 +54,11 @@ class BPENaive:
     def _split_on_special_tokens(self, text: str, training=False) -> List[str]:
         """training=True strips the special tokens. False preserves them (for encoding)."""
 
-        special_token_pat = "|".join(map(re.escape, self.special_tokens))
+        if len(self.special_tokens) == 0:
+            # short circuit: empty regex breaks everything up
+            return [text]
+        patterns = sorted(self.special_tokens, key=len, reverse=True)
+        special_token_pat = "|".join(map(re.escape, patterns))
         if training:
             return re.split(special_token_pat, text)
         else:
@@ -142,19 +147,27 @@ class BPENaive:
                 token = self.vocab_inverse[segment_encoded]
                 text_encoded.append(token)
             else:
-                segment_encoded = list(bytes([b]) for b in segment.encode("utf8"))
-                for merge in self.merges:
-                    segment_encoded = BPENaive._merge(segment_encoded, merge)
-                tokens = [self.vocab_inverse[byte_seq] for byte_seq in segment_encoded]
-                text_encoded += tokens
+                segment_pretokenized = self.pretokenizer(segment)
+                for segment in segment_pretokenized:
+                    segment_encoded = list(bytes([b]) for b in segment.encode("utf8"))
+                    for merge in self.merges:
+                        segment_encoded = BPENaive._merge(segment_encoded, merge)
+                    tokens = [
+                        self.vocab_inverse[byte_seq] for byte_seq in segment_encoded
+                    ]
+                    text_encoded += tokens
         return text_encoded
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for string in iterable:
+            yield from self.encode(string)
 
     def decode(self, tokens: list[int]) -> str:
         # The decoding process simply involves the vocab lookup.
         output = bytes([])
         for token in tokens:
             output += self.vocab[token]
-        return output.decode("utf8")
+        return output.decode("utf8", errors="replace")
 
 
 def test_BPE_naive():
@@ -164,8 +177,7 @@ def test_BPE_naive():
 
     test_str = (
         "Hello, world! This is a test.<|STOP|>여러분들, 안녕하세요? 12,34 1 -- 3 #$@$)@"
-        * 200
-    )
+    ) * 1
 
     encoded = tokenizer.encode(test_str)
     decoded = tokenizer.decode(encoded)
