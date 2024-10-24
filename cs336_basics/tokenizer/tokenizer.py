@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import array
-from collections import defaultdict
+import operator
 from dataclasses import dataclass, field
+from functools import reduce
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
@@ -30,20 +31,23 @@ class BPENaive:
     max_vocab_size: int = 1024
     pretokenizer: Callable = pretokenizer_gpt2
     special_tokens: List[str] = field(default_factory=list)
-    special_tokens_dict: Dict[str, int] = field(default_factory=dict, init=False)
+    # special_tokens_dict: Dict[str, int] = field(default_factory=dict, init=False)
     vocab: Dict[int, bytes] = field(default_factory=dict, init=False)
-    merges: list[tuple[int, int]] = field(default_factory=list, init=False)
+    vocab_inverse: Dict[bytes, int] = field(default_factory=dict, init=False)
+    merges: list[tuple[bytes, bytes]] = field(default_factory=list, init=False)
 
     def __post_init__(self):
         self._map_special_tokens()
         self._train(self.corpus_path)
+        # BUG: could be a bug, not being careful...
+        self.vocab_inverse = {v: k for k, v in self.vocab.items()}
 
     def _map_special_tokens(self):
         # Scheme: split the string on special tokens. Tokenize these manually.
         # Then operate normally on the rest. (no cou nting on special tokens)
         # NOTE: Assume "valid" special tokens (no substring issues)
         for i, token in enumerate(self.special_tokens):
-            self.special_tokens_dict[token] = i
+            # self.special_tokens_dict[token] = i
             self.vocab[i] = token.encode("utf8")
 
     def _split_on_special_tokens(self, text: str, training=False) -> List[str]:
@@ -67,17 +71,18 @@ class BPENaive:
         # Pre-tokenize and create count table
         text = self.pretokenizer(corpus)
         # BUG: we count overlapping tokens, but should probably disregard (sentencepiece...)
-        count_dict_pretoken: Dict[Tuple[int, ...], int] = {}
+        # count_dict_pretoken: Dict[Tuple[int, ...], int] = {}
+        count_dict_pretoken: Dict[Tuple[bytes, ...], int] = {}
         # count_dict_pair = Dict[tuple[int, int], int] = {}
         for pretoken in text:
-            token = tuple(n + len(self.special_tokens) for n in pretoken.encode("utf8"))
+            token = tuple(bytes([b]) for b in pretoken.encode("utf8"))
             if token not in count_dict_pretoken:
                 count_dict_pretoken[token] = 1
             else:
                 count_dict_pretoken[token] += 1
-        while len(self.vocab) <= self.max_vocab_size:
+        while len(self.vocab) < self.max_vocab_size:
             # count frequencies
-            count_dict: Dict[tuple[int, int], int] = {}
+            count_dict: Dict[tuple[bytes, bytes], int] = {}
             for pretoken in count_dict_pretoken.keys():
                 for pair in zip(pretoken, pretoken[1:]):
                     if pair not in count_dict:
@@ -87,7 +92,9 @@ class BPENaive:
             # Most frequent scan
             most_frequent_pair = None
             max_count = -1
-            for pair in sorted(count_dict.keys()):
+            for pair in sorted(
+                count_dict.keys()
+            ):  # Guarantees lexicographic merge ordering
                 count = count_dict[pair]
                 if count >= max_count:
                     most_frequent_pair = pair
@@ -99,31 +106,25 @@ class BPENaive:
             self.merges.append(most_frequent_pair)
             with pytest.raises(KeyError):
                 print(self.vocab[len(self.vocab)])
-            self.vocab[len(self.vocab)] = (
-                self.vocab[most_frequent_pair[0]] + self.vocab[most_frequent_pair[1]]
-            )
+            self.vocab[len(self.vocab)] = reduce(operator.add, most_frequent_pair)
             # Update the pretoken count dict (manual merge)
             # PERF: conversion to/from tuple is wasteful (array.array not hashable so need to...)
             for pretoken in list(count_dict_pretoken):
-                new_key = array.array("I", pretoken)
-                new_key = BPENaive._merge(
-                    new_key, most_frequent_pair, len(self.vocab) - 1
-                )
-                new_key = tuple(new_key)
+                new_key = list(pretoken)  # can't avoid this?
+                new_key = BPENaive._merge(new_key, most_frequent_pair)
+                new_key = tuple(new_key)  # keys need to be mutable...
                 if new_key != pretoken:
                     count_dict_pretoken[new_key] = count_dict_pretoken[pretoken]
                     del count_dict_pretoken[pretoken]
 
     @staticmethod
-    def _merge(
-        token_seq: array.ArrayType, merge_pair: tuple[int, int], new_token: int
-    ) -> array.ArrayType:
+    def _merge(token_seq: List[bytes], merge_pair: tuple[bytes, bytes]) -> List[bytes]:
         ptr = 0
         while ptr < len(token_seq) - 1:
-            byte = token_seq[ptr]
-            next_byte = token_seq[ptr + 1]
-            if (byte, next_byte) == merge_pair:
-                token_seq[ptr] = new_token
+            byte_seq = token_seq[ptr]
+            next_byte_seq = token_seq[ptr + 1]
+            if (byte_seq, next_byte_seq) == merge_pair:
+                token_seq[ptr] = byte_seq + next_byte_seq
                 token_seq[ptr + 1 :] = token_seq[ptr + 2 :]
                 # token_seq = token_seq[:-1]
             else:
@@ -137,21 +138,15 @@ class BPENaive:
         text_encoded = []
         for segment in text_split_special:
             if segment in self.special_tokens:
-                token = self.special_tokens_dict[segment]
+                segment_encoded = segment.encode("utf8")
+                token = self.vocab_inverse[segment_encoded]
                 text_encoded.append(token)
             else:
-                segment_encoded = array.array(
-                    "I",
-                    (
-                        byte + len(self.special_tokens)
-                        for byte in segment.encode("utf8")
-                    ),
-                )
-                token = 256 + len(self.special_tokens)
+                segment_encoded = list(bytes([b]) for b in segment.encode("utf8"))
                 for merge in self.merges:
-                    segment_encoded = BPENaive._merge(segment_encoded, merge, token)
-                    token += 1
-                text_encoded += segment_encoded
+                    segment_encoded = BPENaive._merge(segment_encoded, merge)
+                tokens = [self.vocab_inverse[byte_seq] for byte_seq in segment_encoded]
+                text_encoded += tokens
         return text_encoded
 
     def decode(self, tokens: list[int]) -> str:
