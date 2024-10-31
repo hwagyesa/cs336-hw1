@@ -6,7 +6,7 @@ from statistics import mean, stdev
 
 import tiktoken
 
-from tokenizer import BPENaive
+from tokenizer import BPENaive, BPEImproved
 
 
 def generate_random_text(length):

@@ -509,9 +509,9 @@ def test_BPE_naive():
 
 
 def test_BPE_improved():
-    corpus_path = Path("./test_data/test.txt")
-    vocab_size = 512  # 'initial' size is 256 (bytes)
-    tokenizer = BPEImproved(corpus_path, vocab_size, special_tokens=["<|STOP|>"])
+    corpus_path = Path("../../data/TinyStoriesV2-GPT4-train.txt")
+    vocab_size = 10000  # 'initial' size is 256 (bytes)
+    tokenizer = BPEImproved(corpus_path, vocab_size, special_tokens=["<|endoftext|>"])
 
     # test_str = (
     #     "Hello, world! This is a test.<|STOP|>여러분들, 안녕하세요? 12,34 1 -- 3 #$@$)@"
