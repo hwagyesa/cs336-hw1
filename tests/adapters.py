@@ -7,7 +7,7 @@ from typing import IO, BinaryIO, Iterable, Optional, Type
 
 import numpy.typing as npt
 import torch
-from cs336_basics.tokenizer.tokenizer import BPENaive
+from cs336_basics.tokenizer.tokenizer import BPEImproved
 
 
 def run_positionwise_feedforward(
@@ -540,7 +540,7 @@ def get_tokenizer(
     """
     if special_tokens is None:
         special_tokens = []
-    tokenizer = BPENaive(
+    tokenizer = BPEImproved(
         vocab=vocab, merges=merges, special_tokens=special_tokens
     )
     return tokenizer
@@ -577,7 +577,7 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
     path = Path(input_path)
-    tokenizer = BPENaive(
+    tokenizer = BPEImproved(
         corpus_path=path, max_vocab_size=vocab_size, special_tokens=special_tokens
     )
     return tokenizer.vocab, tokenizer.merges

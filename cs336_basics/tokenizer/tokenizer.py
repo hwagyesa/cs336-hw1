@@ -44,10 +44,11 @@ class Node:
 @dataclass
 class DLinkedList:
     head: Optional[Node] = None
+    init_rank: int = 0
 
     def append(self, value: bytes) -> None:
         if not self.head:
-            self.head = Node(value, 0)
+            self.head = Node(value, self.init_rank)
             return
 
         current = self.head
@@ -55,6 +56,9 @@ class DLinkedList:
             current = current.next
         current.next = Node(value, current.rank + 1)
         current.next.prev = current
+
+    def as_byte_sequence(self) -> Tuple[bytes, ...]:
+        return tuple(node.value for node in self)
 
     def __str__(self) -> str:
         return " <-> ".join(str(node.value) for node in self)
@@ -64,170 +68,6 @@ class DLinkedList:
         while current:
             yield current
             current = current.next
-
-
-class BPEEncoder:
-    def __init__(self):
-        self.priority_queue: SortedDict[
-            tuple[int, tuple[bytes, bytes]], SortedSet[Node]
-        ] = SortedDict()
-        self.pair_counts: Dict[tuple[bytes, bytes], tuple[int, SortedSet[Node]]] = {}
-
-    def initialize_from_string(self, text: str) -> DLinkedList:
-        string = DLinkedList()
-        for char in text:
-            string.append(char.encode("utf8"))
-
-        self._initialize_counts(string)
-        return string
-
-    def _initialize_counts(self, string: DLinkedList) -> None:
-        current = string.head
-        while current and current.next:
-            pair = (current.value, current.next.value)
-            count, ptrs = self.pair_counts.get(
-                pair, (0, SortedSet(key=lambda x: x.rank))
-            )
-            ptrs.add(current)
-            self.pair_counts[pair] = (count + 1, ptrs)
-            # Move to the next pair, checking for overlap (we don't double count)
-            if (
-                current.value == current.next.value
-                and current.next.next
-                and current.next.value == current.next.next.value
-            ):
-                current = current.next.next
-            else:
-                current = current.next
-
-        for pair, (count, ptrs) in self.pair_counts.items():
-            self.priority_queue[(count, pair)] = ptrs
-
-    def _update_pair_count(
-        self, pair: tuple[bytes, bytes], node: Node, count_delta: int
-    ) -> None:
-        """Helper to update counts for a pair in both data structures"""
-        if pair not in self.pair_counts:
-            if count_delta > 0:
-                self.pair_counts[pair] = (
-                    count_delta,
-                    SortedSet([node], key=lambda x: x.rank),
-                )
-                self.priority_queue[(count_delta, pair)] = SortedSet(
-                    [node], key=lambda x: x.rank
-                )
-            return
-
-        old_count, ptrs = self.pair_counts[pair]
-        del self.priority_queue[(old_count, pair)]
-
-        new_count = old_count + count_delta
-        if count_delta > 0:
-            ptrs.add(node)
-            # Perform overlap check
-            if (
-                node.prev
-                and node.prev in ptrs
-                and node.prev.prev
-                and node.prev.prev in ptrs
-            ):
-                # Overlap detected.
-                # POSSIBLE BUG: We'll assume count_delta is the same as for previous pair. I think ok...
-                ptrs.remove(node.prev)
-                new_count -= count_delta
-        else:
-            ptrs.remove(node)
-
-        if new_count > 0:
-            self.pair_counts[pair] = (new_count, ptrs)
-            self.priority_queue[(new_count, pair)] = ptrs
-        else:
-            del self.pair_counts[pair]
-
-    def merge_most_frequent(self) -> None:
-        """Merge the most frequent pair and update data structures"""
-        if not self.priority_queue:
-            return
-
-        (count, pair), nodes = self.priority_queue.popitem()
-        del self.pair_counts[pair]
-
-        for node in nodes:
-            if not node.next:  # Skip if no next node to merge with
-                continue
-
-            # Update counts for affected pairs
-            if node.prev:
-                self._update_pair_count((node.prev.value, node.value), node.prev, -1)
-
-            # If there's a pair after the one we're merging, update its count
-            if node.next.next:
-                after_pair = (node.next.value, node.next.next.value)
-                self._update_pair_count(after_pair, node.next, -1)
-
-            # Perform merge
-            node.value += node.next.value
-            old_next = node.next.next
-            node.next = old_next
-            if old_next:
-                old_next.prev = node
-
-            # Add new pairs
-            if node.prev:
-                self._update_pair_count((node.prev.value, node.value), node.prev, 1)
-            if node.next:
-                self._update_pair_count((node.value, node.next.value), node, 1)
-
-
-def print_state(encoder: BPEEncoder, string: DLinkedList, iteration: int) -> None:
-    """Helper function to print the current state of the encoder"""
-    print(f"\nIteration {iteration}")
-    print(f"Current string: {string}")
-    print("Priority Queue:")
-    for (count, pair), nodes in encoder.priority_queue.items():
-        print(f"  Count: {count}, Pair: {pair}, Nodes: {len(nodes)}")
-
-
-def test_bpe_encoder():
-    """Test the BPE encoder with the example string"""
-    test_str = "peter piper picked a peck of pickled peppers"
-    encoder = BPEEncoder()
-    string = encoder.initialize_from_string(test_str)
-
-    print("Initial state:")
-    print_state(encoder, string, 0)
-
-    # Perform several merges
-    for i in range(1, 6):  # Do 5 merges
-        encoder.merge_most_frequent()
-        print_state(encoder, string, i)
-
-    # Test edge cases
-    print("\nTesting edge cases:")
-
-    # Test single character
-    encoder = BPEEncoder()
-    string = encoder.initialize_from_string("a")
-    print("\nSingle character:")
-    print_state(encoder, string, 0)
-    encoder.merge_most_frequent()  # Should handle gracefully
-
-    # Test repeated characters
-    encoder = BPEEncoder()
-    string = encoder.initialize_from_string("aaaaaa")
-    print("\nRepeated characters:")
-    print_state(encoder, string, 0)
-    encoder.merge_most_frequent()
-    print_state(encoder, string, 1)
-
-    # Test overlapping pairs
-    encoder = BPEEncoder()
-    string = encoder.initialize_from_string("aaaa")
-    print("\nOverlapping pairs:")
-    print_state(encoder, string, 0)
-    encoder.merge_most_frequent()
-    print_state(encoder, string, 1)
-    print("hi")
 
 
 def pretokenizer_gpt2(text: str) -> list[str]:
@@ -386,7 +226,6 @@ class BPENaive:
         return output.decode("utf8", errors="replace")
 
 
-# TODO: Fast training implementation: better data structures for merges.
 # TODO: Fast encoding implementation: support chunking, possible merge optimizations.
 # Chunking notes.
 # Chunk with (forward) overlaps (one-side).
@@ -453,92 +292,47 @@ class BPEImproved:
         for i in range(256):
             self.vocab[i + len(self.special_tokens)] = bytes([i])
         # Get corpus content
+        # TODO: Implement chunked mode...
         with open(corpus_path, "r") as file:
             corpus = file.read()
         # Strip special tokens.
         corpus = "".join(self._split_on_special_tokens(corpus, training=True))
         # Pre-tokenize and create count table
+        # TODO: should be simplifying by counting repetitions of pretokens
         text = self.pretokenizer(corpus)
-        # BUG: we count overlapping tokens, but should probably disregard (sentencepiece...)
-        count_dict_pretoken: Dict[Tuple[bytes, ...], int] = {}
-        # count_dict_pair = Dict[tuple[int, int], int] = {}
-        for pretoken in text:
-            token = tuple(bytes([b]) for b in pretoken.encode("utf8"))
-            if token not in count_dict_pretoken:
-                count_dict_pretoken[token] = 1
-            else:
-                count_dict_pretoken[token] += 1
+        merge_helper = BPEHelper(text)
         while len(self.vocab) < self.max_vocab_size:
-            # count frequencies
-            count_dict: Dict[tuple[bytes, bytes], int] = {}
-            for pretoken in count_dict_pretoken.keys():
-                for pair in zip(pretoken, pretoken[1:]):
-                    if pair not in count_dict:
-                        count_dict[pair] = count_dict_pretoken[pretoken]
-                    else:
-                        count_dict[pair] += count_dict_pretoken[pretoken]
-            # Most frequent scan
-            most_frequent_pair = None
-            max_count = -1
-            for pair in sorted(
-                count_dict.keys()
-            ):  # Guarantees lexicographic merge ordering
-                count = count_dict[pair]
-                if count >= max_count:
-                    most_frequent_pair = pair
-                    max_count = count
-            # Log merge and update vocab
-            if most_frequent_pair is None:
-                # Nothing left to merge.
+            new_merge = merge_helper.merge_most_frequent()
+            if new_merge is None:
                 break
-            self.merges.append(most_frequent_pair)
-            with pytest.raises(KeyError):
-                print(self.vocab[len(self.vocab)])
-            self.vocab[len(self.vocab)] = reduce(operator.add, most_frequent_pair)
-            # Update the pretoken count dict (manual merge)
-            # PERF: conversion to/from tuple is wasteful
-            for pretoken in list(count_dict_pretoken):
-                new_key = list(pretoken)  # can't avoid this?
-                new_key = BPEImproved._merge(new_key, most_frequent_pair)
-                new_key = tuple(new_key)  # keys need to be mutable...
-                if new_key != pretoken:
-                    count_dict_pretoken[new_key] = count_dict_pretoken[pretoken]
-                    del count_dict_pretoken[pretoken]
-
-    @staticmethod
-    def _merge(token_seq: List[bytes], merge_pair: tuple[bytes, bytes]) -> List[bytes]:
-        ptr = 0
-        while ptr < len(token_seq) - 1:
-            byte_seq = token_seq[ptr]
-            next_byte_seq = token_seq[ptr + 1]
-            if (byte_seq, next_byte_seq) == merge_pair:
-                token_seq[ptr] = byte_seq + next_byte_seq
-                token_seq[ptr + 1 :] = token_seq[ptr + 2 :]
-                # token_seq = token_seq[:-1]
-            else:
-                ptr += 1
-        return token_seq
+            self.merges.append(new_merge)
+            self.vocab[len(self.vocab)] = reduce(operator.add, new_merge)
 
     def encode(self, text: str) -> list[int]:
         # The encoding process involves converting to utf8, then applying the merges.
         # We also need to start by treating special characters in a special way.
         text_split_special = self._split_on_special_tokens(text, training=False)
-        text_encoded = []
+        segment_list = []
         for segment in text_split_special:
             if segment in self.special_tokens:
-                segment_encoded = segment.encode("utf8")
-                token = self.vocab_inverse[segment_encoded]
-                text_encoded.append(token)
+                segment_list.append(segment)
             else:
                 segment_pretokenized = self.pretokenizer(segment)
-                for segment in segment_pretokenized:
-                    segment_encoded = list(bytes([b]) for b in segment.encode("utf8"))
-                    for merge in self.merges:
-                        segment_encoded = BPEImproved._merge(segment_encoded, merge)
-                    tokens = [
-                        self.vocab_inverse[byte_seq] for byte_seq in segment_encoded
-                    ]
-                    text_encoded += tokens
+                for string in segment_pretokenized:
+                    segment_list.append(string)
+        merge_helper = BPEHelper(segment_list)
+        merge_helper.merge_from_list(self.merges)
+        text_encoded = []
+        for idx, string in enumerate(segment_list):
+            if string in self.special_tokens:
+                string_encoded = string.encode("utf8")
+                token = self.vocab_inverse[string_encoded]
+                text_encoded.append(token)
+            else:
+                string_encoded = merge_helper.string_list[idx].as_byte_sequence()
+                text_encoded += [
+                    self.vocab_inverse[byte_seq] for byte_seq in string_encoded
+                ]
         return text_encoded
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
@@ -551,6 +345,153 @@ class BPEImproved:
         for token in tokens:
             output += self.vocab[token]
         return output.decode("utf8", errors="replace")
+
+
+class BPEHelper:
+    def __init__(self, texts: List[str]):
+        self.priority_queue: SortedDict[
+            tuple[int, tuple[bytes, bytes]], SortedSet[Node]
+        ] = SortedDict()
+        self.pair_counts: Dict[tuple[bytes, bytes], tuple[int, SortedSet[Node]]] = {}
+        self.string_list: List[DLinkedList] = []
+        self._initialize_from_strings(texts)
+
+    def _initialize_from_strings(self, texts: List[str]) -> None:
+        dlls = []
+        last_len = 0
+        for text in texts:
+            string = DLinkedList(init_rank=last_len)
+            for char in text:
+                for i in char.encode("utf8"):
+                    b = bytes([i])
+                    string.append(b)
+                    last_len += len(b)
+
+            dlls.append(string)
+        self._initialize_counts(dlls)
+        self.string_list = dlls
+
+    def _initialize_counts(self, strings: List[DLinkedList]) -> None:
+        for string in strings:
+            current = string.head
+            while current and current.next:
+                pair = (current.value, current.next.value)
+                count, ptrs = self.pair_counts.get(
+                    pair, (0, SortedSet(key=lambda x: x.rank))
+                )
+                ptrs.add(current)
+                self.pair_counts[pair] = (count + 1, ptrs)
+                # TODO: not counting overlap here (hard to get right...)
+                current = current.next
+
+        for pair, (count, ptrs) in self.pair_counts.items():
+            self.priority_queue[(count, pair)] = ptrs
+
+    def _update_priority_queue(
+        self,
+        pair: tuple[bytes, bytes],
+        node: Node,
+        count_delta: int,
+        tabulate_counts: bool = True,
+    ) -> None:
+        """Helper to update counts and pointers for a pair in both data structures"""
+        if pair not in self.pair_counts:
+            if count_delta > 0:
+                self.pair_counts[pair] = (
+                    count_delta,
+                    SortedSet([node], key=lambda x: x.rank),
+                )
+                if tabulate_counts:
+                    self.priority_queue[(count_delta, pair)] = SortedSet(
+                        [node], key=lambda x: x.rank
+                    )
+            return
+
+        old_count, ptrs = self.pair_counts[pair]
+        new_count = old_count + count_delta
+        if count_delta > 0:
+            ptrs.add(node)
+        else:
+            ptrs.remove(node)
+
+        if tabulate_counts:
+            del self.priority_queue[(old_count, pair)]
+
+        if new_count > 0:
+            self.pair_counts[pair] = (new_count, ptrs)
+            if tabulate_counts:
+                self.priority_queue[(new_count, pair)] = ptrs
+        else:
+            del self.pair_counts[pair]
+
+    def _process_merges(
+        self, pair: tuple[bytes, bytes], nodes: SortedSet[Node], training: bool = True
+    ) -> None:
+        if pair[0] == pair[1]:
+            # This case can have overlap issues. We need to be a bit careful.
+            # Our approach is to ensure the merges occur safely.
+            node_list = nodes.copy()
+            overlap_toggle = 1
+            for node in nodes:
+                if not node.next or not node.next.next:
+                    continue
+                if not node.prev or not node.prev.value == node.value:
+                    # Reset the toggle if we're at the start of a new run
+                    overlap_toggle = 1
+                if node.next.value == node.value and node.next.next.value == node.value:
+                    # Run of three. We should skip the previous (if toggle).
+                    if overlap_toggle:
+                        node_list.remove(node.next)
+                    overlap_toggle ^= 1
+        else:
+            node_list = nodes
+
+        for node in node_list:
+            if not node.next:  # Skip if no next node to merge with
+                continue
+
+            # Update counts for affected pairs
+            if node.prev:
+                before_pair = (node.prev.value, node.value)
+                update_pq = before_pair != pair  # This only happens with overlap
+                self._update_priority_queue(before_pair, node.prev, -1, update_pq & training)
+
+            # If there's a pair after the one we're merging, update its count
+            if node.next.next:
+                after_pair = (node.next.value, node.next.next.value)
+                update_pq = after_pair != pair  # This only happens with overlap
+                self._update_priority_queue(after_pair, node.next, -1, update_pq & training)
+
+            # Perform merge
+            node.value += node.next.value
+            old_next = node.next.next
+            node.next = old_next
+            if old_next:
+                old_next.prev = node
+
+            # Add new pairs
+            if node.prev:
+                self._update_priority_queue((node.prev.value, node.value), node.prev, 1, training)
+            if node.next:
+                self._update_priority_queue((node.value, node.next.value), node, 1, training)
+
+        del self.pair_counts[pair]
+
+    def merge_most_frequent(self) -> tuple[bytes, bytes] | None:
+        """Merge the most frequent pair and update data structures"""
+        if not self.priority_queue:
+            return None
+
+        (count, pair), nodes = self.priority_queue.popitem()
+        self._process_merges(pair, nodes, training=True)
+        return pair
+
+    def merge_from_list(self, merge_list: List[tuple[bytes, bytes]]) -> None:
+        for pair in merge_list:
+            if pair not in self.pair_counts:
+                continue
+            count, nodes = self.pair_counts[pair]
+            self._process_merges(pair, nodes, training=False)
 
 
 def test_BPE_naive():
@@ -567,6 +508,21 @@ def test_BPE_naive():
     assert decoded == test_str
 
 
+def test_BPE_improved():
+    corpus_path = Path("./test_data/test.txt")
+    vocab_size = 512  # 'initial' size is 256 (bytes)
+    tokenizer = BPEImproved(corpus_path, vocab_size, special_tokens=["<|STOP|>"])
+
+    # test_str = (
+    #     "Hello, world! This is a test.<|STOP|>여러분들, 안녕하세요? 12,34 1 -- 3 #$@$)@"
+    # ) * 1
+    test_str = "10000000000000000000 00000000000"
+
+    encoded = tokenizer.encode(test_str)
+    decoded = tokenizer.decode(encoded)
+    assert decoded == test_str
+
+
 if __name__ == "__main__":
     # Some benchmarking
-    pass
+    test_BPE_improved()
