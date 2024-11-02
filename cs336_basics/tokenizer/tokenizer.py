@@ -1,18 +1,30 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import gc
 import heapq
+import linecache
 import operator
+import os
 import pprint
+import sys
+import threading
+import time
+import tracemalloc
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import reduce, total_ordering
 from pathlib import Path
 from types import NoneType
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
+import psutil
 import pytest
 import regex as re
 from sortedcontainers import SortedDict, SortedSet
+
+# from memory_monitor import memory_tracker, track_memory
 
 # Tokenizer class and tests
 
@@ -287,6 +299,7 @@ class BPEImproved:
         else:
             return re.split("(" + special_token_pat + ")", text)
 
+    # @track_memory('training')
     def _train(self, corpus_path: Path):
         # Initialize with bytes.
         for i in range(256):
@@ -308,6 +321,7 @@ class BPEImproved:
             self.merges.append(new_merge)
             self.vocab[len(self.vocab)] = reduce(operator.add, new_merge)
 
+    # @track_memory('encoding')
     def encode(self, text: str) -> list[int]:
         # The encoding process involves converting to utf8, then applying the merges.
         # We also need to start by treating special characters in a special way.
@@ -430,6 +444,7 @@ class BPEHelper:
         if pair[0] == pair[1]:
             # This case can have overlap issues. We need to be a bit careful.
             # Our approach is to ensure the merges occur safely.
+            # BUG: (possible) this is a pretty brittle implementation. if node.rank overflows it breaks, + not multiproc-able (needs to operate sequentially)
             node_list = nodes.copy()
             overlap_toggle = 1
             for node in nodes:
@@ -454,26 +469,36 @@ class BPEHelper:
             if node.prev:
                 before_pair = (node.prev.value, node.value)
                 update_pq = before_pair != pair  # This only happens with overlap
-                self._update_priority_queue(before_pair, node.prev, -1, update_pq & training)
+                self._update_priority_queue(
+                    before_pair, node.prev, -1, update_pq & training
+                )
 
             # If there's a pair after the one we're merging, update its count
             if node.next.next:
                 after_pair = (node.next.value, node.next.next.value)
                 update_pq = after_pair != pair  # This only happens with overlap
-                self._update_priority_queue(after_pair, node.next, -1, update_pq & training)
+                self._update_priority_queue(
+                    after_pair, node.next, -1, update_pq & training
+                )
 
             # Perform merge
             node.value += node.next.value
-            old_next = node.next.next
-            node.next = old_next
-            if old_next:
-                old_next.prev = node
+            old_next = node.next
+            new_next = old_next.next
+            node.next = new_next
+            if new_next:
+                new_next.prev = node
+            del old_next
 
             # Add new pairs
             if node.prev:
-                self._update_priority_queue((node.prev.value, node.value), node.prev, 1, training)
+                self._update_priority_queue(
+                    (node.prev.value, node.value), node.prev, 1, training
+                )
             if node.next:
-                self._update_priority_queue((node.value, node.next.value), node, 1, training)
+                self._update_priority_queue(
+                    (node.value, node.next.value), node, 1, training
+                )
 
         del self.pair_counts[pair]
 
@@ -494,6 +519,18 @@ class BPEHelper:
             self._process_merges(pair, nodes, training=False)
 
 
+def measure_runtime(func):
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        runtime = end_time - start_time
+        print(f"Function '{func.__name__}' took {runtime:.4f} seconds to run")
+        return result
+
+    return wrapper
+
+
 def test_BPE_naive():
     corpus_path = Path("./test_data/test.txt")
     vocab_size = 512  # 'initial' size is 256 (bytes)
@@ -511,7 +548,15 @@ def test_BPE_naive():
 def test_BPE_improved():
     corpus_path = Path("../../data/TinyStoriesV2-GPT4-train.txt")
     vocab_size = 10000  # 'initial' size is 256 (bytes)
-    tokenizer = BPEImproved(corpus_path, vocab_size, special_tokens=["<|endoftext|>"])
+
+    @measure_runtime
+    def create_tokenizer():
+        return BPEImproved(
+            corpus_path,
+            vocab_size,
+            special_tokens=["<|endoftext|>"],
+        )
+    tokenizer = create_tokenizer()
 
     # test_str = (
     #     "Hello, world! This is a test.<|STOP|>여러분들, 안녕하세요? 12,34 1 -- 3 #$@$)@"
